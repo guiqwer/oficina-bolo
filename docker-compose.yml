@@ -1,0 +1,94 @@
+services:
+  web:
+    build:
+      context: ./frontend
+    expose:
+      - "80"
+    restart: unless-stopped
+    environment:
+      API_BASE_URL: ""
+      KEYCLOAK_PUBLIC_URL: /auth
+      KEYCLOAK_REALM: pdc-generated
+      KEYCLOAK_CLIENT_ID: pdc-generated-app
+    depends_on:
+      backend:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+
+  backend:
+    build:
+      context: ./backend
+    expose:
+      - "8000"
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: sqlite:////data/app.db
+      KEYCLOAK_ISSUER: http://keycloak:8080/auth/realms/pdc-generated
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/auth/realms/pdc-generated/protocol/openid-connect/certs
+      KEYCLOAK_AUDIENCE: pdc-generated-api
+    volumes:
+      - backend_data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    depends_on:
+      keycloak:
+        condition: service_healthy
+
+  keycloak:
+    build:
+      context: ./deploy/keycloak
+    command: ["start", "--optimized", "--import-realm"]
+    expose:
+      - "8080"
+      - "9000"
+    restart: unless-stopped
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Defina KEYCLOAK_ADMIN_PASSWORD no ambiente}
+      KC_DB_URL_HOST: auth-db
+      KC_DB_URL_PORT: "5432"
+      KC_DB_URL_DATABASE: keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Defina KEYCLOAK_DB_PASSWORD no ambiente}
+      KC_HTTP_ENABLED: "true"
+      # Um nó só: sem isto o Keycloak sobe o Infinispan em cluster (JGroups,
+      # descoberta por JDBC_PING no banco e certificados mTLS) e leva ~20s a
+      # mais para abrir a porta.
+      KC_CACHE: local
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME_STRICT: "false"
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "{ printf 'HEAD /health/ready HTTP/1.0\r\n\r\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/127.0.0.1/9000"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 240s
+
+  auth-db:
+    image: postgres:16-alpine
+    expose:
+      - "5432"
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Defina KEYCLOAK_DB_PASSWORD no ambiente}
+    volumes:
+      - keycloak_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  backend_data:
+  keycloak_data:
